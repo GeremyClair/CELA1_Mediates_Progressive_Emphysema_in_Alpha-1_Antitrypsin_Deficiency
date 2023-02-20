@@ -1,0 +1,307 @@
+---
+title: 'LungMAP_Cela1_Mouse'
+author: Geremy Clair, Zane Taylor
+date: January 9, 2023
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+    theme : cerulean
+    code_folding: hide
+---
+
+```{r knit_options, message=FALSE, warning=FALSE, include=FALSE, paged.print=FALSE}
+knitr::opts_chunk$set(fig.width=10, fig.height=6, echo = TRUE, results = TRUE, warning = FALSE, message=FALSE) 
+options(repos=structure(c(CRAN="https:/cloud.r-project.org/")))
+setwd("~/Documents/GitHub/CELA1_Mediates_Progressive_Emphysema_in_Alpha-1_Antitrypsin_Deficiency/")
+print("All files will be saved in the folder or subfolder of")
+getwd()
+```
+
+# Required libraries
+
+The required libraries are loaded 
+- MageR written by Geremy Clair (2022) is used to extract the search results from PNNL internal Data Management System (DMS)
+- RomicsProcessor written by Geremy Clair (2022) is used to perform trackable transformation and statistics to the dataset 
+- proteinminion written by Geremy Clair (2022) is used to extract fasta information and to perform gene ontology, KEGG, and reactome pathways enrichement analysis (2022)
+```{r load_packages}
+library("MageR")
+library("RomicsProcessor")
+library("proteinminion")
+library("DT")
+```
+
+# Fasta and protein ontologies download using 'Protein Mini-On'
+
+Using the package 'Protein Mini-on' (Geremy Clair 2022, in prep.), The fasta file was downloaded from Unipro for murine proteome December 30th, 2022
+```{r download_fasta}
+if(!file.exists("03_output_files/Uniprot_Mus_musculus_proteome_UP000000589_2023_01_09.fasta")){
+    download_UniProtFasta(proteomeID = "UP000000589",reviewed = T,export = TRUE, file="./03_output_files/Uniprot_Mus_musculus_proteome_UP000000589_2023_01_09.fasta")
+}
+
+UniProtFasta_info<-UniprotFastaParser(file = "03_output_files/Uniprot_Mus_musculus_proteome_UP000000589_2023_01_09.fasta")
+write.csv(UniProtFasta_info, "03_output_files/UniProtFasta_info_Mouse.csv")
+```
+
+For each entry, 'Protein Mini-On' was use to download Gene Ontology (GO) terms and KEGG ids associated with the proteins. This upload was performed the exact same day as the download of the fasta file was done to ensure that the IDs will be identical as the ones present in the fasta file used).
+```{r UniProtTable_download}
+if(file.exists("./03_output_files/UniprotTable_Mus_musculus_proteome_UP000000589_2023_01_09.csv")){
+  UniProtTable<-read.csv("./03_output_files/UniprotTable_Mus_musculus_proteome_UP000000589_2023_01_09.csv")
+  }else{
+  download_UniProtTable(proteomeID = "UP000000589",reviewed = T)
+  write.csv(UniProtTable,("./03_output_files/UniprotTable_Mus_musculus_proteome_UP000000589_2023_01_09.csv"),row.names=FALSE)
+  }
+```
+
+'Protein-Mini-on' was then used to generate a table (UniProtTable) containing the list of GOs and their associated protein IDs
+```{r UniProtTable_GO_generation}
+if(file.exists("./03_output_files/UniProtTable_GO.csv")){
+  UniProtTable_GO<-read.csv(file="./03_output_files/UniProtTable_GO.csv")
+}else{
+generate_UniProtTable_GO()
+write.csv(UniProtTable_GO,file="./03_output_files/UniProtTable_GO.csv",row.names=FALSE)
+}
+```
+
+'Protein-Mini-on' was used to download similar information from KEGG for the Pathways associated with each protein
+```{r UniProtTable_KEGG_generation}
+if(file.exists("./03_output_files/UniProtTable_KEGG.csv")){
+  UniProtTable_KEGG<-read.csv(file="./03_output_files/UniProtTable_KEGG.csv")
+}else{
+generate_UniProtTable_KEGG()
+write.csv(UniProtTable_KEGG,file="./03_output_files/UniProtTable_KEGG.csv",row.names=FALSE)
+}
+```
+
+'Protein-Mini-on' was used to download similar information from REACTOME for the Pathways associated with each protein
+```{r UniProtTable_REACTOME_generation}
+UniProtTable$Reactome_List<-sub("R-HSA-9767675;","",UniProtTable$Reactome_List)
+
+if(file.exists("./03_output_files/UniProtTable_REACTOME.csv")){
+  UniProtTable_REACTOME<-read.csv(file="./03_output_files/UniProtTable_REACTOME.csv")
+}else{
+generate_UniProtTable_REACTOME()
+write.csv(UniProtTable_REACTOME,file="./03_output_files/UniProtTable_REACTOME.csv",row.names=FALSE)
+}
+```
+
+
+# import LFQ data
+
+The LFQ data contained in the proteinGroup file was loaded, the corresponding metadata was loaded
+```{r data_metadata_load}
+data<-extractMaxQuant(file = "01_source_files/proteinGroups.txt",cont.rm = T,site.rm = T,rev.rm = T)
+IDs<-extractMaxQuantIDs(file = "01_source_files/proteinGroups.txt",cont.rm = T,site.rm = T,rev.rm = T)
+metadata<-read.csv(file = "01_source_files/metadata.csv")
+colnames(data)<-toupper(colnames(data))
+colnames(metadata)<-toupper(colnames(metadata))
+```
+
+# Romics_object creation
+
+The data and metadata were placed in an romics_object, the sample names were retrieved from the metadata, the condition  will be use for the coloring of the Figure and statistics
+```{r create_romics}
+romics_proteins<-romicsCreateObject(data,metadata,main_factor = "condition")
+romics_proteins<-romicsSampleNameFromFactor(romics_proteins,factor = "rename")
+```
+
+
+# data cleaning and normalization
+
+The missingness was evaluated for each channel/sample
+```{r missingness_eval_treatment}
+romics_proteins<- romicsZeroToMissing(romics_proteins)
+romicsPlotMissing(romics_proteins)
+```
+
+The proteins to be conserved for quantification were selected to contain at least 75% of complete values (3/4 samples) for a given condition, the overall missingness was evaluated after filtering.
+```{r missing_filter}
+romics_proteins<-romicsFilterMissing(romics_proteins,percentage_completeness = 50)
+print(paste0(nrow(romics_proteins$data),"/", nrow(romics_proteins$original_data)," proteins remained after filtering", " (",round(nrow(romics_proteins$data)/nrow(romics_proteins$original_data)*100,2),"%)."))
+romicsPlotMissing(romics_proteins)
+```
+
+The data was log2 transformed, the distriution boxplot were then plotted
+```{r log2}
+romics_proteins<-log2transform(romics_proteins)
+distribBoxplot(romics_proteins)
+```
+
+As the same quantity of protein was labelled for each sample, the expectation is that the distribution of the protein abundance is centered, therefore a median centering was performed prior to plot again the distribution boxplots.
+```{r median_norm}
+romics_proteins<-medianCenterSample(romics_proteins)
+distribBoxplot(romics_proteins)
+```
+Oultier detection will be performed
+```{r}
+romicsOutlierEval(romics_proteins,pvalue_threshold = 0.000001,label = T)
+```
+
+## Grouping evaluation
+
+The grouping of the samples was evaluated
+```{r hclust}
+romicsHclust(romics_proteins)
+```
+
+Similarily, a PCA was performed prior imputation of the missing data
+```{r PCA}
+indPCAplot(romics_proteins, ncp=5,plotType = "percentage")
+indPCAplot(romics_proteins, ncp=5,plotType = "individual",Xcomp=1,Ycomp =2,label = T)
+indPCAplot(romics_proteins, ncp=5,plotType = "individual",Xcomp=2,Ycomp =3,label = F)
+```
+
+## Data imputation
+
+For some of the subsequent statistics imputations are required, we performed an imputation by assuming that the "non-detected" proteins were either low abundance or missing using the method developped by Tyranova et al. (PMID: 27348712). The gray distribution is the data distribution, the yellow distribution is the one for the random values used for imputation.
+```{r imput_missing}
+imputeMissingEval(romics_proteins,nb_stdev = 2,width_stdev = 0.5, bin=1)
+romics_proteins<-imputeMissing(romics_proteins,nb_stdev = 2,width_stdev = 0.5)
+distribHistogramGlobal(romics_proteins)
+```
+
+The hclust and PCA grouping were checked again after imputation
+```{r grouping}
+romicsHclust(romics_proteins)
+indPCAplot(romics_proteins, plotType = "percentage")
+indPCAplot(romics_proteins, plotType = "individual",Xcomp=1,Ycomp =2,label = F)
+indPCAplot(romics_proteins,  plotType = "individual",Xcomp=2,Ycomp =3,label = F)
+indPCA3D(romics_proteins)
+```
+
+## Statistics
+
+The means and stdev are calculated for each group
+```{r Means_stdevs_treatment}
+romics_proteins<-romicsMean(romics_proteins)
+romics_proteins<-romicsSd(romics_proteins)
+romics_proteins<-romicsZscores(romics_proteins)
+```
+
+ANOVA are performed
+```{r statistics_ANOVA_treatment}
+romics_proteins<-romicsANOVA(romics_proteins)
+```
+
+A heatmap depicting the proteins passing an ANOVA p<0.05 is plotted, the clusters obtained were saved in the statistics.
+```{r Heatmap_treatment}
+romicsHeatmap(romics_proteins,variable_hclust_number = 5,ANOVA_filter = "p", p=0.05,sample_hclust = F,color_boundaries = c(-1.5,1.5))
+romics_proteins<-romicsVariableHclust(romics_proteins,clusters = 5,ANOVA_filter = "p",p= 0.05,plot = F)
+```
+
+An enrichment analysis was performed for these four clusters generated
+```{r enrichments}
+Enrichments<-romicsEnrichement(romics_object = romics_proteins,type = c("GO", "KEGG", "REACTOME"),cluster_filter =  "hclust_clusters", enrichment_function="EASE")
+Enrichments <- Enrichments[Enrichments$pval<0.1 &Enrichments$fold_change>=1,]
+datatable(Enrichments)
+write.table(Enrichments,file="03_output_files/Enrichments_ANOVA_clusts.txt",sep="\t",row.names = F)
+```
+
+T.tests were added to the statistics
+```{r ttest}
+romics_proteins<-romicsTtest(romics_proteins,percentage_completeness = 50,reverse_order = T)
+romicsVolcano(romics_proteins,min_fold_change = 0,p_type = "p")
+pFrequencyPlot(romics_proteins)
+```
+
+## Group Ttest enrichment analysis
+
+For the following comparison enrichment analyses were performed
+Cela1 vs WT
+AAT vs WT
+DKO vs WT
+AAT vs DKO
+Cela1 vs DKO
+AAT vs Cela1
+
+```{r ttest enrichments}
+modulated_Cela1_vs_wt<- romicsEnrichement(romics_proteins,statCol_filter = "Cela1_vs_WT_Ttest_p",statCol_text = "<0.05")
+up_Cela1_vs_wt<- romicsEnrichement(romics_proteins,statCol_filter = "Cela1_vs_WT_Ttest_p" ,statCol_text = "<0.05",statCol_filter2 = "log(Cela1/WT)",statCol_text2 = ">1")
+
+down_Cela1_vs_wt<- romicsEnrichement(romics_proteins,statCol_filter = "Cela1_vs_WT_Ttest_p",statCol_text = "<0.05",statCol_filter2 = "log(Cela1/WT)",statCol_text2 = "<1")
+
+modulated_AAT_vs_wt<- romicsEnrichement(romics_proteins,statCol_filter = "AAT_vs_WT_Ttest_p",statCol_text = "<0.05")
+up_AAT_vs_wt<- romicsEnrichement(romics_proteins,statCol_filter = "AAT_vs_WT_Ttest_p",statCol_text = "<0.05",statCol_filter2 = "log(AAT/WT)",statCol_text2 = ">1")
+down_AAT_vs_wt<- romicsEnrichement(romics_proteins,statCol_filter = "AAT_vs_WT_Ttest_p",statCol_text = "<0.05",statCol_filter2 = "log(AAT/WT)",statCol_text2 = "<1")
+
+modulated_DKO_vs_wt<- romicsEnrichement(romics_proteins,statCol_filter = "DKO_vs_WT_Ttest_p",statCol_text = "<0.05")
+up_DKO_vs_wt<- romicsEnrichement(romics_proteins,statCol_filter = "DKO_vs_WT_Ttest_p",statCol_text = "<0.05",statCol_filter2 = "log(DKO/WT)",statCol_text2 = ">1")
+down_DKO_vs_wt<- romicsEnrichement(romics_proteins,statCol_filter = "DKO_vs_WT_Ttest_p",statCol_text = "<0.05",statCol_filter2 = "log(DKO/WT)",statCol_text2 = "<1")
+
+modulated_Cela1_vs_DKO<- romicsEnrichement(romics_proteins,statCol_filter = "Cela1_vs_DKO_Ttest_p",statCol_text = "<0.05")
+up_Cela1_vs_DKO<- romicsEnrichement(romics_proteins,statCol_filter = "Cela1_vs_DKO_Ttest_p",statCol_text = "<0.05",statCol_filter2 = "log(Cela1/DKO)",statCol_text2 = ">1")
+down_Cela1_vs_DKO<- romicsEnrichement(romics_proteins,statCol_filter = "Cela1_vs_DKO_Ttest_p",statCol_text = "<0.05",statCol_filter2 = "log(Cela1/DKO)",statCol_text2 = "<1")
+
+modulated_AAT_vs_DKO<- romicsEnrichement(romics_proteins,statCol_filter = "AAT_vs_DKO_Ttest_p",statCol_text = "<0.05")
+up_AAT_vs_DKO<- romicsEnrichement(romics_proteins,statCol_filter = "AAT_vs_DKO_Ttest_p",statCol_text = "<0.05",statCol_filter2 = "log(AAT/DKO)",statCol_text2 = ">1")
+down_AAT_vs_DKO<- romicsEnrichement(romics_proteins,statCol_filter = "AAT_vs_DKO_Ttest_p",statCol_text = "<0.05",statCol_filter2 = "log(AAT/DKO)",statCol_text2 = "<1")
+
+modulated_AAT_vs_Cela1<- romicsEnrichement(romics_proteins,statCol_filter = "AAT_vs_Cela1_Ttest_p",statCol_text = "<0.05")
+up_AAT_vs_Cela1<- romicsEnrichement(romics_proteins,statCol_filter = "AAT_vs_Cela1_Ttest_p",statCol_text = "<0.05",statCol_filter2 = "log(AAT/Cela1)",statCol_text2 = ">1")
+down_AAT_vs_Cela1<- romicsEnrichement(romics_proteins,statCol_filter = "AAT_vs_Cela1_Ttest_p",statCol_text = "<0.05",statCol_filter2 = "log(AAT/Cela1)",statCol_text2 = "<1")
+
+enrichments_ttest<-rbind(modulated_Cela1_vs_wt,up_Cela1_vs_wt,down_Cela1_vs_wt,
+                         modulated_AAT_vs_wt,up_AAT_vs_wt,down_AAT_vs_wt,
+                         modulated_DKO_vs_wt,up_DKO_vs_wt,down_DKO_vs_wt,
+                         modulated_Cela1_vs_DKO,up_Cela1_vs_DKO,down_Cela1_vs_DKO,
+                         modulated_AAT_vs_DKO,up_AAT_vs_DKO,down_AAT_vs_DKO,
+                         modulated_AAT_vs_Cela1,up_AAT_vs_Cela1,down_AAT_vs_Cela1)
+enrichments_ttest<-enrfilter(enrichments_ttest,pval_type = "pval",foldchange = 1,min_feature = 2)
+datatable(enrichments_ttest)
+write.csv(enrichments_ttest,file = "03_output_files/Enrichments_ttests.csv")
+```
+
+The data was exported for further exploration
+```{r export_results_bleo_longitudinal}
+results<-romicsExportData(romics_proteins,statistics = T,missing_data = T)
+results<-merge(results,IDs,by.x = 0, by.y=1)
+write.csv(results, file= "./03_output_files/Results_with_stats.csv")
+```
+
+## proteins of interest
+
+Example of proteins of interest or modulated were plotted
+```{r singleplots_treatment}
+library("ggpubr")
+Figs<-romics_proteins
+
+boxplotscatter<-function(protein_name="protein_name"){
+title<-rownames(Figs$data[grepl(paste0(".*",protein_name,".*"),rownames(Figs$data)),])
+title<-paste0(gsub("//.*","",title)," - ",gsub(" .*","",UniProtTable$Gene_Name[UniProtTable$Uniprot_Accession %in% protein_name]))
+
+yposition <- max(Figs$data[grepl(paste0(".*",protein_name,".*"),rownames(Figs$data)),])
+
+singleVariablePlot(Figs,variable =protein_name)+ggtitle(label = title)+
+  geom_bracket(xmin = "AAT", xmax = "WT", y.position = yposition+3.5, label =formatC(Figs$statistics[grepl(paste0(".*",protein_name,".*"),rownames(Figs$statistics)),colnames(Figs$statistics)=="AAT_vs_WT_Ttest_p"], format = "f"))+
+  geom_bracket(xmin = "Cela1", xmax = "WT", y.position = yposition+1.5, label =formatC(Figs$statistics[grepl(paste0(".*",protein_name,".*"),rownames(Figs$statistics)),colnames(Figs$statistics)=="Cela1_vs_WT_Ttest_p"], format = "f"))+
+  geom_bracket(xmin = "DKO", xmax = "WT", y.position = yposition+0.5, label =formatC(Figs$statistics[grepl(paste0(".*",protein_name,".*"),rownames(Figs$statistics)),colnames(Figs$statistics)=="DKO_vs_WT_Ttest_p"], format = "f"))+
+  geom_bracket(xmin = "AAT", xmax = "DKO", y.position = yposition+2.5, label =formatC(Figs$statistics[grepl(paste0(".*",protein_name,".*"),rownames(Figs$statistics)),colnames(Figs$statistics)=="AAT_vs_DKO_Ttest_p"], format = "f"))+
+  geom_bracket(xmin = "Cela1", xmax = "DKO", y.position = yposition+0.5, label =formatC(Figs$statistics[grepl(paste0(".*",protein_name,".*"),rownames(Figs$statistics)),colnames(Figs$statistics)=="Cela1_vs_DKO_Ttest_p"], format = "f"))+
+   geom_bracket(xmin = "AAT", xmax = "Cela1", y.position = yposition+0.5, label =formatC(Figs$statistics[grepl(paste0(".*",protein_name,".*"),rownames(Figs$statistics)),colnames(Figs$statistics)=="AAT_vs_Cela1_Ttest_p"], format = "f"))
+  
+}
+boxplotscatter(protein_name = "Q00897")
+boxplotscatter(protein_name = "P07758")
+boxplotscatter(protein_name = "P22599")
+boxplotscatter(protein_name = "Q920H1")
+boxplotscatter(protein_name = "P50405")
+boxplotscatter(protein_name = "Q06770")
+
+boxplotscatter(protein_name = "Q9D3B1")
+boxplotscatter(protein_name = "Q3UVK0")
+boxplotscatter(protein_name = "Q9CQ73")
+boxplotscatter(protein_name = "Q9DBJ3")
+boxplotscatter(protein_name = "P98203")
+
+boxplotscatter(protein_name = "Q505D7")
+boxplotscatter(protein_name = "Q8R1S0")
+boxplotscatter(protein_name = "Q6ZWY8")
+boxplotscatter(protein_name = "A2AVZ9")
+boxplotscatter(protein_name = "P13745")
+
+
+
+
+```
+
